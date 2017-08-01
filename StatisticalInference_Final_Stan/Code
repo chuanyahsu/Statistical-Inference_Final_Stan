@@ -1,0 +1,177 @@
+library(metafor)
+library(rmeta)
+library(rstan)
+
+############################################################################################################
+
+### Read the dataset
+magnesium <-  read.csv("C:/Users/NYU/Dropbox/2016 Spring/Inference/Final/magnesium.csv", header = T)
+
+####### Frequentist #########################################################################################
+
+
+### Create two subsets: 
+# A: the first 8 trials
+# B: the first 14 trials
+A <- subset(magnesium, magnesium$tableorder <= 8)
+B <- subset(magnesium, magnesium$tableorder <= 14)
+
+### Run the fixed effects models
+a <- rma.peto(ai=dead1, n1i=tot1, ci=dead0, n2i=tot0, slab=trialnam, data=A)
+b <- rma.peto(ai=dead1, n1i=tot1, ci=dead0, n2i=tot0, slab=trialnam, data=B)
+full <- rma.peto(ai=dead1, n1i=tot1, ci=dead0, n2i=tot0, slab=trialnam, data=magnesium)
+
+### Run the random effects models
+a1 <- meta.DSL(ntrt=tot1, nctrl=tot0, ptrt=dead1, pctrl=dead0, conf.level=0.95, data=A)
+b1 <- meta.DSL(ntrt=tot1, nctrl=tot0, ptrt=dead1, pctrl=dead0, conf.level=0.95, data=B)
+full1 <- meta.DSL(ntrt=tot1, nctrl=tot0, ptrt=dead1, pctrl=dead0, conf.level=0.95, data=magnesium)
+
+### Create the table that include the information we want
+table <- cbind(magnesium$dead1, magnesium$tot1, magnesium$dead0, magnesium$tot0)
+rownames(table) <- magnesium$trialnam
+colnames(table) <- c("Deaths rm", "Patients nm", "Deaths rc", "Patients nc")
+newtable <- as.table(table[order(magnesium$tableorder),])
+
+### Saved the string which contain OR and CI
+# Fixed effect models
+p1 <- cbind(paste0("Fixed effect (Peto) meta-analysis of above eight trials: OR=",round(exp(a$b),2)," (95% CI: ",round(exp(a$ci.lb),2),", ",round(exp(a$ci.ub),2),");"),NA, NA, NA)
+p2 <- cbind(paste0("Fixed effect (Peto) meta-analysis of above 14 trials: OR=",round(exp(b$b),2)," (95% CI: ",round(exp(b$ci.lb),2),", ",round(exp(b$ci.ub),2),");"),NA,NA,NA)
+p3 <- cbind(paste0("Fixed effect (Peto) meta-analysis of above 15 trials: OR=",round(exp(full$b),2)," (95% CI: ",round(exp(full$ci.lb),2),", ",round(exp(full$ci.ub),2),");"),NA,NA,NA)
+
+# Random effect models
+ci.value <- 1.96
+ci1 <- round(exp( a1$logDSL + c( -ci.value,ci.value ) * a1$selogDSL ),2)
+ci2 <- round(exp( b1$logDSL + c( -ci.value,ci.value ) * b1$selogDSL ),2)
+ci3 <- round(exp( full1$logDSL + c( -ci.value,ci.value ) * full1$selogDSL ),2)
+d1 <- cbind(paste0("Random effects (D-L) meta-analysis of above eight trials: OR=", round(exp(a1$logDSL),2), " (95% CI: ", ci1[1], ", ", ci1[2], ");"),NA,NA,NA)
+d2 <- cbind(paste0("Random effects (D-L) meta-analysis of above 14 trials: OR=", round(exp(b1$logDSL),2), " (95% CI: ", ci2[1], ", ", ci2[2], ");"),NA,NA,NA)
+d3 <- cbind(paste0("Random effects (D-L) meta-analysis of above 15 trials: OR=", round(exp(full1$logDSL),2), " (95% CI: ", ci3[1], ", ", ci3[2], ");"),NA,NA,NA)
+
+### Combine the data and the outputs into one table
+final_table <- rbind(newtable[1:8,],p1,d1,newtable[9:14,],p2,d2,newtable[15,],p3,d3)
+final_table <- as.table(final_table)
+
+### Plot the forestplots
+forest(a)
+forest(b)
+forest(full)
+
+####### Bayesian ##############################################################################################
+
+### Data
+# rc <- Binomial(nc, pc) patients in the study who is dead 
+# rm <- Binomial(nm, pm)
+k <- nrow(magnesium) # Number of trials
+nc <- magnesium$tot0 # Patients in the control group
+nm <- magnesium$tot1 # Patients in the treatment group
+rc <- magnesium$dead0 # Patients in the control group who are dead
+rm <- magnesium$dead1 # Patients in the treatment group who are dead
+
+### Build the model under reference prior distribution by stan
+model_string_1 = "data {
+int<lower=0> k;
+int<lower=0> nc[k]; // size of rc
+int<lower=0> nm[k]; // size of rm
+int<lower=0> rc[k]; 
+int<lower=0> rm[k]; 
+}
+parameters {
+real<lower=0, upper=1> pc[k];
+real delta[k];          // log odds ratio from pc to pm
+real mu;                // expected value of log odds ratio
+real<lower=0> sigma;
+real deltanew;          // estimate log odds ratio
+}
+transformed parameters {
+real<lower=0, upper=1> pm[k];
+for (i in 1:k){
+pm[i] <- exp(log(pc[i]/(1-pc[i]))+delta[i]) / (1 + exp(log(pc[i]/(1-pc[i]))+delta[i])); // the relationship between pc, delta, and pm
+}  
+}
+model {
+# actual model
+rc ~ binomial(nc, pc);
+rm ~ binomial(nm, pm);
+delta ~ normal(mu, sigma); 
+deltanew ~ normal(mu, sigma);
+
+# priors
+pc ~ uniform(0, 1);
+mu ~ normal(0, 100); 
+sigma ~ uniform(0,100);
+}"
+
+### Run the model, iter=50,000, chain=3, warmup=500
+model_fit1 <- stan(model_code = model_string_1,data=c("k","nc","nm", "rc", "rm"), pars = "deltanew", iter=50000, chains=3, warmup = 500)
+
+### Plot the trace plot
+traceplot(model_fit1, par="deltanew")
+
+### Compute the posterior probability of odds ratio
+meta_sim1 <- extract (model_fit1, permuted=TRUE)
+
+e_deltanew1 <- exp(meta_sim1$deltanew) # transform log odds ratio to odds ratio
+
+summary(e_deltanew1) # the summary statistics of odds ratio
+
+sum(e_deltanew1 < 1)/length(e_deltanew1) # the statistical superiority
+
+sum(e_deltanew1 < 0.9)/length(e_deltanew1) # the clinical superiority
+
+# Plot the posterior probability distribution histogram
+hist(e_deltanew1, xlim=c(0,5), breaks=50000, main='Posterior Distribution --- Reference Prior', xlab='odds ratio') 
+
+
+### Build the model under skeptical prior distribution by stan
+model_string_2 = "data {
+int<lower=0> k;
+int<lower=0> nc[k]; // size of rc
+int<lower=0> nm[k]; // size of rm
+int<lower=0> rc[k]; 
+int<lower=0> rm[k]; 
+}
+parameters {
+real<lower=0, upper=1> pc[k];
+real delta[k];          // log odds ratio from pc to pm
+real mu;                // expected value of log odds ratio
+real<lower=0> sigma;
+real deltanew;          // estimate log odds ratio
+}
+transformed parameters {
+real<lower=0, upper=1> pm[k];
+for (i in 1:k){
+pm[i] <- exp(log(pc[i]/(1-pc[i]))+delta[i]) / (1 + exp(log(pc[i]/(1-pc[i]))+delta[i])); // the relationship between pc, delta, and pm
+}  
+}
+model {
+# actual model
+rc ~ binomial(nc, pc);
+rm ~ binomial(nm, pm);
+delta ~ normal(mu, sigma); 
+deltanew ~ normal(mu, sigma);
+
+# priors
+pc ~ uniform(0, 1);
+mu ~ normal(0, 0.1749);  // sqrt(1/32.69)=0.1749
+sigma ~ uniform(0,100);
+}"
+
+### Run the model, iter=50,000, chain=3, warmup=500
+model_fit2 <- stan(model_code = model_string_2,data=c("k","nc","nm", "rc", "rm"), pars = "deltanew", iter=50000, chains=3, warmup = 500)
+
+### Plot the trace plot
+traceplot(model_fit2, par="deltanew")
+
+### Compute the posterior probability of odds ratio
+meta_sim2 <- extract (model_fit2, permuted=TRUE)
+
+e_deltanew2 <- exp(meta_sim2$deltanew) # transform log odds ratio to odds ratio
+
+summary(e_deltanew2) # the summary statistics of odds ratio
+
+sum(e_deltanew2 < 1)/length(e_deltanew2) # the statistical superiority
+
+sum(e_deltanew2 < 0.9)/length(e_deltanew2) # the clinical superiority
+
+# Plot the posterior probability distribution histogram
+hist(e_deltanew2, xlim=c(0,5), breaks=50000, main='Posterior Distribution --- Skeptical Prior', xlab='odds ratio')
